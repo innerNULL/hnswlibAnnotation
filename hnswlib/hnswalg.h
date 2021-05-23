@@ -25,35 +25,71 @@ namespace hnswlib {
             loadIndex(location, s, max_elements);
         }
 
+        /**
+         * @brief Defination of HNSW index.
+         *
+         * @param s The instance define the distance using in ANN search.
+         * @param max_elements 
+         * The maximum number of elements could be contained in one HNSW instance.
+         * @param M The maximum number of friend-node for each node in HNSW graph.
+         * @param ef_construction 
+         * The size of dynamical-linked-list which used to hold and update `ef_construction` 
+         * nearest nodes which are potential candidated among current node's `M` friend node.
+         */
         HierarchicalNSW(SpaceInterface<dist_t> *s, size_t max_elements, size_t M = 16, size_t ef_construction = 200, size_t random_seed = 100) :
                 link_list_locks_(max_elements), link_list_update_locks_(max_update_element_locks), element_levels_(max_elements) {
             max_elements_ = max_elements;
 
             has_deletions_=false;
+            // Gets bits number used by each vector in one element.
             data_size_ = s->get_data_size();
+            // Gets the function used to calculate the distance between two vectors.
             fstdistfunc_ = s->get_dist_func();
             dist_func_param_ = s->get_dist_func_param();
+            // Ref to @param
             M_ = M;
             maxM_ = M_;
             maxM0_ = M_ * 2;
+            // Ref to @param
             ef_construction_ = std::max(ef_construction,M_);
             ef_ = 10;
 
+            // Initialize random-num generators.
             level_generator_.seed(random_seed);
             update_probability_generator_.seed(random_seed + 1);
 
+            /// There are three components for each element:
+            ///     1. vector data, the number of bits allocated by it is `data_size_`.
+            ///     2. label, which is each element's external-id, the number of bits 
+            ///        allocated by it is `sizeof(labeltype)`.
+            ///     3. links info, which save the information of this node's friend-nodes, 
+            ///        the number of bits allocated by it is `size_links_level0_`.
+            ///
+            /// So for each element, the bit number it will occupy is `size_links_level0_`, 
+            /// which is the sum of its each components memory usage. 
             size_links_level0_ = maxM0_ * sizeof(tableint) + sizeof(linklistsizeint);
             size_data_per_element_ = size_links_level0_ + data_size_ + sizeof(labeltype);
+            /// `offsetData_` and `label_offset_` are the memory-address offset about 
+            /// the location of vector-data and label relative to each element's address 
+            /// start point. These info will be helpful when we copy the element data to 
+            /// memory in the order of links info, vector data, label.
+            ///
+            /// Besides, `offsetLevel0_` is level0-layer's link info, since for each element, 
+            /// this data located at first block, so the offset to the start-point of memory 
+            /// is zero. 
             offsetData_ = size_links_level0_;
             label_offset_ = size_links_level0_ + data_size_;
             offsetLevel0_ = 0;
 
+            /// The memory that level0 of HNSW index will allocate.
             data_level0_memory_ = (char *) malloc(max_elements_ * size_data_per_element_);
             if (data_level0_memory_ == nullptr)
                 throw std::runtime_error("Not enough memory");
 
             cur_element_count = 0;
 
+            /// The linked-list holds each node which has been visited, distance-calculated, 
+            /// and finally eliminated out from potential friend-node list.
             visited_list_pool_ = new VisitedListPool(1, max_elements);
 
 
@@ -62,6 +98,7 @@ namespace hnswlib {
             enterpoint_node_ = -1;
             maxlevel_ = -1;
 
+            /// The detail refer to annotation in `get_linklist` method. 
             linkLists_ = (char **) malloc(sizeof(void *) * max_elements_);
             if (linkLists_ == nullptr)
                 throw std::runtime_error("Not enough memory: HierarchicalNSW failed to allocate linklists");
@@ -70,6 +107,13 @@ namespace hnswlib {
             revSize_ = 1.0 / mult_;
         }
 
+        /**
+         * @brief
+         * Compare with nodes' distance to target node is closer. 
+         * Each node is represented as a `std::pair<dist_t, tableint>` instance, while 
+         * `dist_t` represent this node's similarity/distance to certain target node, 
+         * and `tableint` is this node's internal-id in HNSW index.
+         */
         struct CompareByFirst {
             constexpr bool operator()(std::pair<dist_t, tableint> const &a,
                                       std::pair<dist_t, tableint> const &b) const noexcept {
@@ -104,7 +148,9 @@ namespace hnswlib {
 
         VisitedListPool *visited_list_pool_;
         std::mutex cur_element_count_guard_;
-
+        
+        /// This is a vector of `std::mutex` with each element corresponding one 
+        /// level of layer in HNWS index sreucture.
         std::vector<std::mutex> link_list_locks_;
 
         // Locks to prevent race condition during update/insert of an element at same time.
@@ -112,12 +158,30 @@ namespace hnswlib {
         std::vector<std::mutex> link_list_update_locks_;
         tableint enterpoint_node_;
 
-
+        /// TODO: Adds annotation. 
         size_t size_links_level0_;
+        /// Here are some common offset values:
+        /// `offsetData_`: 
+        ///     This offset refers to the starting of address of each element's memory 
+        ///     buffer in HNSW level0 graph info memory buffer, (plus) with this offset,
+        ///     we can easily reach the starting bit of each element's vector-data's 
+        ///     memory buffer.  
+        /// `offsetLevel0_`: 
+        ///     Ref to the starting of address of each element's memory buffer in 
+        ///     HNSW level0 graph info memory buffer, (plus) with this offset, we can 
+        ///     easily reach the starting bit of each element's HNSW-level0-graph info's 
+        ///     memory buffer.
+        ///     NOTE: 
+        ///     Since for each element's memory buffer in `data_level0_memory_`, the info's 
+        ///     order is [HNSW-level0-graph info][vector-data][label], so `offsetLevel0_` 
+        ///     does not have offset, so, it's offset is zero. 
         size_t offsetData_, offsetLevel0_;
 
-
+        /// `data_level0_memory_` is a pointer points the starting of memory-buffer of 
+        /// all element's basic-info (which includes HNSW-level0-graph linking/connections info, 
+        /// vector-data, label).
         char *data_level0_memory_;
+        /// This is a c-lang style 2-dim array style memory-buffer, which contains each
         char **linkLists_;
         std::vector<int> element_levels_;
 
@@ -148,6 +212,19 @@ namespace hnswlib {
             return (labeltype *) (data_level0_memory_ + internal_id * size_data_per_element_ + label_offset_);
         }
 
+        /**
+         * @brief 
+         * Gets the memory address of certain element's vector data, which internal id 
+         * is `internal_id`.
+         *
+         * In detail, the address start-point of HNSW level0 is `data_level0_memory_`, so 
+         * the address pointing to `internal_id`-th element is 
+         * `data_level0_memory_ + internal_id * size_data_per_element_` since each element 
+         * has `size_data_per_element_` bits memory usage. And for the bits range occupied by 
+         * our target element, the bits offset of vector-data to this memory range's start point 
+         * is `offsetData_` bits, so the bit-range for our target updating vactor data is 
+         * pointer by `data_level0_memory_ + internal_id * size_data_per_element_ + offsetData_`. 
+         */
         inline char *getDataByInternalId(tableint internal_id) const {
             return (data_level0_memory_ + internal_id * size_data_per_element_ + offsetData_);
         }
@@ -332,6 +409,10 @@ namespace hnswlib {
             return top_candidates;
         }
 
+        /**
+         * @brief
+         * Get top `M` highest similarity/distance score element from `top_candidates`.
+         */
         void getNeighborsByHeuristic2(
                 std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> &top_candidates,
         const size_t M) {
@@ -379,14 +460,82 @@ namespace hnswlib {
             return (linklistsizeint *) (data_level0_memory_ + internal_id * size_data_per_element_ + offsetLevel0_);
         };
 
+        /**
+         * @brief
+         * Gets the pointer points the start of memory buffer that contains certain id's 
+         * element-connections/links info in certain level graph of HNSW index.  
+         *
+         * @param internal_id
+         * The element internal-id that we hope to get the pointer points this element's 
+         * level0-graph info memory buffer from `data_level0_memory_`.
+         * @param data_level0_memory_
+         * It's a pointer points a memory buffer (actually an c-style array). This memory 
+         * buffer saves all info of the graph for the layer/level/hierarchical of 0 in HNSW.
+         */
         linklistsizeint *get_linklist0(tableint internal_id, char *data_level0_memory_) const {
+            /// `data_level0_memory_` is the address points the starting of the memory buffer of 
+            /// HNSW level0 graph info. 
+            /// The `internal_id * size_data_per_element_` is the offset of `internal_id`-th 
+            /// element info refer to starting of level0 graph memory buffer.
+            /// `offsetLevel0_` is the offset of the memory-buffer of HNSW level0 graph 
+            /// connections/links info refer to starting of `internal_id`-th element memory-buffer. 
             return (linklistsizeint *) (data_level0_memory_ + internal_id * size_data_per_element_ + offsetLevel0_);
         };
 
+        /**
+         * @brief 
+         * Get the pointer points the starting bit of`internal_id`-th element's 
+         * `level`-th level/layer graph info.
+         * NOTE: 
+         * The value of `level` is larger than zero this place. 
+         *
+         * The reason is, in hnswlib, the HNSW level0 graph info belongs element 'basic info', 
+         * which is unified held by `data_level0_memory_` together with element label and 
+         * vector-data, and all element have level0 graph info data. 
+         *
+         * But not every element has graph info with level higher than zero, so higher-level 
+         * graph info does not belongs element basic-info and seperately saved in `linkLists_`.
+         *
+         * The `get_linklist` will extract target memory buffer pointer from `linkLists_`, so 
+         * it only supports graph level higher than zero. 
+         *
+         * @param internal_id Same as in `get_linklist0`.
+         * @param level HNSW graph level number/id/order. 
+         */
         linklistsizeint *get_linklist(tableint internal_id, int level) const {
+            /// `linkLists_` is an `char **`, a c-style 2-dim array. It is mainly used to 
+            /// saving the info of HNSW higher levels/layers' graph info for each element.
+            /// The higher levels/layers means, levels/layers which number larger than 0.
+            /// 
+            /// So, `linkLists_[internal_id]` is the pointer points the starting bits for 
+            /// `internal_id`-th element's higher-level graph connections info.
+            ///
+            /// NOTE:
+            /// Saying `linkLists_` is an '2-dim array' is not accurate, is actually an 
+            /// pointer of an pointer array. Since for each pointer (corresponding to each 
+            /// element), the length of the array it points to could be different with each 
+            /// other. 
+            /// For example, an element only touchs HNSW level0 graph, which corresponding 
+            /// pointer in `linkLists_` will points an zero length array. 
+            /// 
+            /// On the other hand, an element which at most touchs HNSW level_n graph, 
+            /// then besides level0 graph info saved in `data_level0_memory_`, its higher 
+            /// level graph info is saved in `linkLists_`, with `linkLists_[internal_id]` 
+            /// as starting bit, and  
+            /// `linkLists_[internal_id] + n * size_links_per_element_` as ending bit.
+            ///
+            /// So, when we want to get the pointer points `internal_id`-th element's 
+            /// `level`-th level/layer graph info, the starting bit of this target memory 
+            /// buffer is `linkLists_[internal_id] + (level - 1) * size_links_per_element_`, 
+            /// while `size_links_per_element_` represents one level/layer's graph info 
+            /// memory usage if that info exists. 
             return (linklistsizeint *) (linkLists_[internal_id] + (level - 1) * size_links_per_element_);
         };
 
+        /**
+         * @brief 
+         * Get pointer points `internal_id`-th element's `level`-th level graph connection info. 
+         */
         linklistsizeint *get_linklist_at_level(tableint internal_id, int level) const {
             return level == 0 ? get_linklist0(internal_id) : get_linklist(internal_id, level);
         };
@@ -815,6 +964,9 @@ namespace hnswlib {
             return *ll_cur & DELETE_MARK;
         }
 
+        /**
+         * @brief TODO: Figure it out.
+         */
         unsigned short int getListCount(linklistsizeint * ptr) const {
             return *((unsigned short int *)ptr);
         }
@@ -827,56 +979,188 @@ namespace hnswlib {
             addPoint(data_point, label,-1);
         }
 
+        /**
+         * @brief
+         * Update already exist's internal id's corresponding vector data and linking info.
+         *
+         * @param dataPoint Updating vector data.
+         * @param internalId Target exists element's internal id.
+         * @param updateNeighborProbability TODO: 
+         */
         void updatePoint(const void *dataPoint, tableint internalId, float updateNeighborProbability) {
             // update the feature vector associated with existing point with new vector
+            /// Tow steps:
+            ///     1. Get the pointer points the first element of the target-updating vector, 
+            ///        done by `getDataByInternalId(internalId)`.
+            ///     2. Copy updating data pointed by `dataPoint` to corresponding bits range 
+            ///        pointed by getDataByInternalId(internalId)`. 
             memcpy(getDataByInternalId(internalId), dataPoint, data_size_);
 
             int maxLevelCopy = maxlevel_;
             tableint entryPointCopy = enterpoint_node_;
-            // If point to be updated is entry point and graph just contains single element then just return.
+            // If point to be updated is entry point and graph just contains single element 
+            // then just return.
+            // Because it is the only point in HNSW and we do not need build any connection.
             if (entryPointCopy == internalId && cur_element_count == 1)
                 return;
 
+            /// `element_levels_` saves for each element, the deepest graph layer/level it 
+            /// touchs in HNSW index, so when we update an element (data vector), we must also 
+            /// update it links info in all layers it involves in. 
             int elemLevel = element_levels_[internalId];
             std::uniform_real_distribution<float> distribution(0.0, 1.0);
+            /// Iterating along each level/layer that current updating element involved in, 
+            /// and updating target element's graph connection info in that layer/level.
             for (int layer = 0; layer <= elemLevel; layer++) {
+                /// Here are two data-structures used to dynamically and continuously mining 
+                /// `internalId`-th element's new top M nearest nodes, which are, friendly nodes.
+                ///
+                /// `sCand`: TODO: Make sure twice!
+                ///     This used to hold the candidates which have potential to be 
+                ///     `internalId`-th element's friend node (top M nearest nodes of it).
+                ///
+                ///     NOTE: TODO: Make sure twice!
+                ///     `sCand` is dynamical updated during each iteration, some old & relatively 
+                ///     far-from `internalId`-th element nodes will be wiped out from `sCand` for 
+                ///     its replacment by recently-mined & relatively closer nodes. The size of 
+                ///     `sCand` must be equal or larger than M.
+                ///
+                ///     Some detail about friend-nodes' dynamically and continuously mining algo:
+                ///     The core idea is composed with several steps:
+                ///         1. Randomly choose an node in graph as entry-point.
+                ///         2. Insert as most as `sCand` size entry-point's top 
+                ///            closer-to-`internalId`-th-element node into `sCand` as first 
+                ///            generation of friend-node candidates.
+                ///         3. Paralleling getting each current candidated nodes' most 
+                ///            `internalId`-th-element-closing friend-nodes, choose `sCand`-size 
+                ///            most `internalId`-th-element-closing nodes from the union of 
+                ///            original candidates and new & just-choosed nodes as new candidates 
+                ///            in `sCand`, eliminate others out from `sCand`.
+                ///         4.  Continuously execute step 3 until `sCand` does not change any more. 
+                /// 
+                /// `sNeigh`: TODO: Make sure twice!
+                ///         `sNeigh` is used to check if `sCand` reachs stability/convergence, 
+                ///         which means `sCand` does not change any more.
+                ///         For each time before `sCand` doing the iteration, we will copy 
+                ///         `sCand` to `sNeigh`, and after `sCand` finished iteration, if `sCand` 
+                ///         is still same with `sNeigh`, then `sCand` reachs stability/convergence. 
+                ///      
                 std::unordered_set<tableint> sCand;
                 std::unordered_set<tableint> sNeigh;
+                /// Gets `internalId`-th element's `layer`-th level graph connection info, 
+                /// saving this element's friend-nodes internal-id into `listOneHop`. 
                 std::vector<tableint> listOneHop = getConnectionsWithLock(internalId, layer);
                 if (listOneHop.size() == 0)
                     continue;
 
+                /// In exists-element updating scenario, we use target updating element/node 
+                /// itself as algorithm entry-point, which is the first node inserted into 
+                /// candidate list `sCand`.
                 sCand.insert(internalId);
 
+                /// The following is the first time iteration/update for `sCand`. Which is just 
+                /// puts all friend-nodes of entry-point (which is `internalId` corresponding 
+                /// element itself) into candidates list `sCand` and convergence-adjuster `sNeigh`.
+                /// The above will be done by iterate along each entry-point's friend-nodes. 
                 for (auto&& elOneHop : listOneHop) {
                     sCand.insert(elOneHop);
 
+                    /// TODO: Figure this out
+                    /// The following codes looks like involves randomness into candidates 
+                    /// selection, but why this only works on `sNeigh` but not also on `sCand`?
                     if (distribution(update_probability_generator_) > updateNeighborProbability)
                         continue;
 
                     sNeigh.insert(elOneHop);
 
+                    /// Get friend-nodes' internal-id list for current entry-point's friend-node.
+                    /// For friend-nodes of one node, we call 'one-hop', for friend-nodes of 
+                    /// frient-node of one node, we call 'two-hop'. 
                     std::vector<tableint> listTwoHop = getConnectionsWithLock(elOneHop, layer);
+                    /// The first time updating process of `sCand`, at this time, it's not 
+                    /// actually updating but appending more potential candidated into itself. 
+                    /// These new candidates are the friend-nodes of current candidate nodes, 
+                    /// which are, 'two-hop' nodes.
                     for (auto&& elTwoHop : listTwoHop) {
                         sCand.insert(elTwoHop);
                     }
                 }
 
+                /// Iteration along each current stage one-hop candidates.
                 for (auto&& neigh : sNeigh) {
 //                    if (neigh == internalId)
 //                        continue;
-
+                    
+                    /// Here we define an priority queue `candidates` to ranking the union of:
+                    ///     1. One-hop candidate friend-nodes.
+                    ///     2. Two-hop candidate friend-nodes, which are the friend-nodes of 
+                    ///        one-hop candidates.
+                    ///
+                    /// The ranking is according each candidats distance/similarity to 
+                    /// `internalId`-th element, higher similarity cnadidates has higher priority, 
+                    /// lower similarity nodes has lower similarity, and high priority to wipe 
+                    /// them out from candidate list. 
+                    /// 
+                    /// NOTE: TODO: Make sure twice!
+                    /// `sCand` is dynamical updated during each iteration, some old & relatively 
+                    /// far-from `internalId`-th element nodes will be wiped out from `sCand` for 
+                    /// its replacment by recently-mined & relatively closer nodes. The size of 
+                    /// `sCand` must be equal or larger than M.
+                    ///
+                    /// Some detail about friend-nodes' dynamically and continuously mining algo:
+                    /// The core idea is composed with several steps:
+                    ///     1. Randomly choose an node in graph as entry-point.
+                    ///     2. Insert as most as `sCand` size entry-point's top 
+                    ///        closer-to-`internalId`-th-element node into `sCand` as first 
+                    ///        generation of friend-node candidates.
+                    ///     3. Paralleling getting each current candidated nodes' most 
+                    ///        `internalId`-th-element-closing friend-nodes, choose `sCand`-size 
+                    ///        most `internalId`-th-element-closing nodes from the union of 
+                    ///        original candidates and new & just-choosed nodes as new candidates 
+                    ///        in `sCand`, eliminate others out from `sCand`.
+                    ///     4.  Continuously execute step 3 until `sCand` does not change any more. 
                     std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidates;
+                    /// The following two lines code is sort of getting an adjusted 
+                    /// `ef_construction` value.
+                    ///
+                    /// In HNSW paper, ef_construction is the size of the prior-queue used to 
+                    /// dynamical/continuously mining target-nodes' top-M friend-nodes, the 
+                    /// adjusted `ef_construction` will be saved in `elementsToKeep`.
                     size_t size = sCand.find(neigh) == sCand.end() ? sCand.size() : sCand.size() - 1; // sCand guaranteed to have size >= 1
                     size_t elementsToKeep = std::min(ef_construction_, size);
+                    /// TODO: Make sure twice!
+                    /// What the following loop does is, Comparing one-hop candidates in `sNeigh` 
+                    /// with tow-hop candidates in `sCand`, and find each one-hop candidates
                     for (auto&& cand : sCand) {
                         if (cand == neigh)
                             continue;
 
+                        /// `fstdistfunc_` is a function used to calculate the distance/similarity 
+                        /// between two nodes, according to certain distance/similarity metric.
+                        ///
+                        /// TODO: BUG: 
+                        /// It seems, for each one-hop candidate node, we should see if each of 
+                        /// its friend-nodes (which are, two-hop candidates) should be put into 
+                        /// `candidates` according the distance/similarity between target-node 
+                        /// (`internalId`-th element) and each two-hop nodes.
+                        /// 
+                        /// In detail, if `candidates` is saturated (which means its size reachs 
+                        /// adjusted ef_construction value, `elementsToKeep`), then if a two-hop 
+                        /// candidate has relative higher similarity to target-node compare with 
+                        /// the element which is least similiar with target-node in `candidates`, 
+                        /// then this least-similiar-to-target-node will be wiped out from 
+                        /// `candidates` and replaced with current two-hop candidate node.
+                        ///
+                        /// BUT: 
+                        /// The potential bug is, for each two-hop node, hnswlib does not calculate 
+                        /// its distance/simlarity with target-node, but with its belonging one-hop
+                        /// node (two-hop nodes belonging one-hop node as friend-nodes).
                         dist_t distance = fstdistfunc_(getDataByInternalId(neigh), getDataByInternalId(cand), dist_func_param_);
+                        /// If   
                         if (candidates.size() < elementsToKeep) {
                             candidates.emplace(distance, cand);
                         } else {
+                            /// If this two-hop condidate node has higher similarity to 
                             if (distance < candidates.top().first) {
                                 candidates.pop();
                                 candidates.emplace(distance, cand);
@@ -967,6 +1251,17 @@ namespace hnswlib {
             }
         }
 
+        /**
+         * @brief 
+         * Gets element's connections/links on certain level of layer of HNSW by given an 
+         * element's internal id and target level.
+         * This includes two steps:
+         *     1. Gets `internalId`-th element's `level`-th level graph info mem-buffer 
+         *        pointer with `get_linklist_at_level`, assign the result to `data`. 
+         *     2. Extracts target connections info and put the result in an `std::vector`, 
+         *        each element represents current element's friend-node's internal-id 
+         *        at HNSW `level`-th layer graph.
+         */
         std::vector<tableint> getConnectionsWithLock(tableint internalId, int level) {
             std::unique_lock <std::mutex> lock(link_list_locks_[internalId]);
             unsigned int *data = get_linklist_at_level(internalId, level);
@@ -977,6 +1272,34 @@ namespace hnswlib {
             return result;
         };
 
+        /**
+         * @brief 
+         * Adds one point/element to HNSW index. Also, a raw point/element is 
+         * composed with a vector pointed by `datapoint` and a label `label`. 
+         * 
+         * We can understand the notion of 'label' in two style, each corresponding 
+         * to unique scenario:
+         *     1. In searching scenario, we can understand 'label' as an external-id of 
+         *        each element/point, for example, user-id, item-id, doc-id, etc.
+         *     2. In KNN inference scenario, the 'label' is always the label of each sample, 
+         *        the most happened label among nearest elements/points will be KNN 
+         *        prediction result. BUT not that easy, since the 'label'-to-internal_id 
+         *        is one-one mapping, so we can not just let 'label' be true label, but 
+         *        should, for example, concate with external-id.
+         *
+         * After this element/point has been added into the index, the index will assign 
+         * it and internal id, and the mapping info of external-id/label to internal-id  
+         * will be saved in `label_lookup_`. 
+         * 
+         * The assignment rule of internal-id is incremental-addition according the index's 
+         * element count. 
+         
+         * SO, we can also see internal-id as the inserting order of certain 
+         * element!
+         * 
+         * The main use of internal-id is to record if certain element 
+         * already exists in HNSW index.
+         */
         tableint addPoint(const void *data_point, labeltype label, int level) {
 
             tableint cur_c = 0;
@@ -984,6 +1307,9 @@ namespace hnswlib {
                 // Checking if the element with the same label already exists
                 // if so, updating it *instead* of creating a new element.
                 std::unique_lock <std::mutex> templock_curr(cur_element_count_guard_);
+                // If there is a point/element marked by `label` already exists in index, 
+                // then we will reused its historical assigned internal id by update the 
+                // element info (e.g., link info) for this internal id's corresponding element.
                 auto search = label_lookup_.find(label);
                 if (search != label_lookup_.end()) {
                     tableint existingInternalId = search->second;

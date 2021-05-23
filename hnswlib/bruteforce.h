@@ -15,11 +15,23 @@ namespace hnswlib {
             loadIndex(location, s);
         }
 
+        /**
+         * @brief 
+         * Defines the Brute-force searching instance, which only supports `maxElements` element 
+         * contained by the index for the limitation of system memory.
+         * Each element is composed with a vector and a label which type is `labeltype`.
+         * 
+         * @param s The pointer points the instance which define the searching-space info.
+         * @param maxElements The max number of  
+         */
         BruteforceSearch(SpaceInterface <dist_t> *s, size_t maxElements) {
             maxelements_ = maxElements;
-            data_size_ = s->get_data_size();
+            // bits number used by each vector 
+            data_size_ = s->get_data_size(); 
             fstdistfunc_ = s->get_dist_func();
             dist_func_param_ = s->get_dist_func_param();
+            // bits number used by each element, each element is composed by 
+            // vector and label which type is `labeltype`.
             size_per_element_ = data_size_ + sizeof(labeltype);
             data_ = (char *) malloc(maxElements * size_per_element_);
             if (data_ == nullptr)
@@ -43,6 +55,19 @@ namespace hnswlib {
 
         std::unordered_map<labeltype,size_t > dict_external_to_internal;
 
+        /**
+         * @brief 
+         * Adds one point/element to brute-force index. Also, one point/element is 
+         * composed with a vector pointed by `datapoint` and a label `label`. 
+         * 
+         * We can understand the notion of 'label' as an external-id of each element/point, 
+         * after this element/point has been added into the index, the index will assign 
+         * it and internal id, and the external-id to internal-id mapping info will be 
+         * saved in `dict_external_to_internal`. 
+         * 
+         * The assignment rule of internal-id is incremental-addition according the index's 
+         * element count.
+         */
         void addPoint(const void *datapoint, labeltype label) {
 
             int idx;
@@ -52,6 +77,8 @@ namespace hnswlib {
 
 
                 auto search=dict_external_to_internal.find(label);
+                // If there is a point/element marked by `label` already exists in index, then 
+                // we will reused its historical assigned internal id.
                 if (search != dict_external_to_internal.end()) {
                     idx=search->second;
                 }
@@ -59,12 +86,20 @@ namespace hnswlib {
                     if (cur_element_count >= maxelements_) {
                         throw std::runtime_error("The number of elements exceeds the specified limit\n");
                     }
+                    // Assign a internal-id to this new element according index's current 
+                    // element count.
                     idx=cur_element_count;
                     dict_external_to_internal[label] = idx;
+                    // Index element count incremental operation.
                     cur_element_count++;
                 }
             }
+            /// Put new element data to corresponding place in memory, the format is 
+            /// | last-element memory range | [vector-data][label] |
+
+            // Put the (new) element's label to corresponding place in memory.
             memcpy(data_ + size_per_element_ * idx + data_size_, &label, sizeof(labeltype));
+            // Put the (new) element's vector data to corresponding place in memory. 
             memcpy(data_ + size_per_element_ * idx, datapoint, data_size_);
 
 

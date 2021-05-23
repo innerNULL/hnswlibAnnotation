@@ -16,18 +16,21 @@ namespace
 using idx_t = hnswlib::labeltype;
 
 void test() {
-    int d = 4;
-    idx_t n = 100;
-    idx_t nq = 10;
-    size_t k = 10;
-   
+    int d = 4; // Vector dimension.
+    idx_t n = 100; // Number of vectors in hnsw index.
+    idx_t nq = 10; // Number of vectors waiting to do the query.
+    size_t k = 10; // Top k results.
+
+    // All vactors which will be used to build the hnsw index. 
     std::vector<float> data(n * d);
+    // All vectors will be used for query.
     std::vector<float> query(nq * d);
 
     std::mt19937 rng;
     rng.seed(47);
     std::uniform_real_distribution<> distrib;
 
+    // Random generation for all vectors.
     for (idx_t i = 0; i < n * d; ++i) {
         data[i] = distrib(rng);
     }
@@ -35,7 +38,7 @@ void test() {
         query[i] = distrib(rng);
     }
       
-
+    // Initializing an `d` dimension space instance.
     hnswlib::L2Space space(d);
     hnswlib::AlgorithmInterface<float>* alg_brute  = new hnswlib::BruteforceSearch<float>(&space, 2 * n);
     hnswlib::AlgorithmInterface<float>* alg_hnsw = new hnswlib::HierarchicalNSW<float>(&space, 2 * n);

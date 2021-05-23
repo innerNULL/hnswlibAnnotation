@@ -3,6 +3,12 @@
 
 namespace hnswlib {
 
+    /**
+     * @brief Calculation of L2 distance between two vectors.
+     * @param pVect1v `void` pointer of (first element of) one vector.
+     * @param pVect2v `void` pointer of (first element of) another vector.
+     * @param qty_ptr `void` pointer points the size/dim of both these vectors. 
+     */
     static float
     L2Sqr(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
         float *pVect1 = (float *) pVect1v;
@@ -184,7 +190,9 @@ namespace hnswlib {
             else if (dim > 4)
                 fstdistfunc_ = L2SqrSIMD4ExtResiduals;
         #endif
+            /// Dimension of vector.
             dim_ = dim;
+            /// How many bits will each vector use.
             data_size_ = dim * sizeof(float);
         }
 

@@ -29,6 +29,7 @@
 #include <string.h>
 
 namespace hnswlib {
+    /// The defination of `labeltype`.
     typedef size_t labeltype;
 
     template <typename T>
