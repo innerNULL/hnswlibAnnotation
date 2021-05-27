@@ -411,7 +411,9 @@ namespace hnswlib {
 
         /**
          * @brief
-         * Get top `M` highest similarity/distance score element from `top_candidates`.
+         * Get top `M` high similarity/distance score element from `top_candidates` while 
+         * keeping considering keep high-ways in HNSW graph. See detail in annotations of 
+         * `while (queue_closest.size()) {...}`. 
          */
         void getNeighborsByHeuristic2(
                 std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> &top_candidates,
@@ -420,21 +422,71 @@ namespace hnswlib {
                 return;
             }
 
+            /// The priority-queue `candidates` in `updatePoint` member function will give 
+            /// the high-distance (which means low similiarity score) nodes high priority (
+            /// to pop out), since the target is to pop the relative further (less similar) 
+            /// nodes out from priority-queue, replace with relatively higher similarity one.
+            ///
+            /// But at this place, our target is priority poping out the relatively colser/
+            /// higher-similarity nodes from `queue_closest` and put it into `return_list` 
+            /// until top `M` nearest/highest-similarity nodes has been decided.
+            ///
+            /// So in this scenario, we let closer-to-target nodes get higher proprity in 
+            /// `queue_closest` by using "-1 * distance" as priority score in `queue_closest`, 
+            /// so in this way, the higher-similarity/lower-distance and lower-priority nods in 
+            /// `top_candidates` can gets a higher priority (to pop out) in `queue_closest`. 
+            /// This process is done in following `while (top_candidates.size() > 0) {...}` loop. 
             std::priority_queue<std::pair<dist_t, tableint>> queue_closest;
+            /// `dist_t` for distance type, `tableint` for element's internal-id type.
             std::vector<std::pair<dist_t, tableint>> return_list;
             while (top_candidates.size() > 0) {
                 queue_closest.emplace(-top_candidates.top().first, top_candidates.top().second);
                 top_candidates.pop();
             }
+            /// After above while loop, the `top_candidates` is empty since all elements 
+            /// had been poped out. 
 
+            /// The following popping-out iteration of `queue_closest` will helps 
+            /// to select out quatify-neighbors of query-node, not only accords distance 
+            /// to query-node, but also consider about how to try best keeping high-ways 
+            /// among HNSW graph. 
             while (queue_closest.size()) {
                 if (return_list.size() >= M)
                     break;
                 std::pair<dist_t, tableint> curent_pair = queue_closest.top();
+                /// Current poping out node's distance to query-node. 
                 dist_t dist_to_query = -curent_pair.first;
                 queue_closest.pop();
+                /// If this node "good"/quatify to be a neighbor of query-node, 
+                /// For now, the "good" means good for HNSW graph to keep more
+                /// high graph, see detail in following annotation.
                 bool good = true;
-
+                
+                /// TODO: Think twice! 
+                /// NOTE: Here is an implicit trick to make confusing! 
+                ///
+                /// Although at each iteration in `while (queue_closest.size()) {...}`, 
+                /// we will pop out and get next most closer-to-query nodes which has 
+                /// highest '-1 * distance' in current `queue_closest`, but not each 
+                /// of these node can be the neighbor of query-node.
+                /// 
+                /// Besides `M` limitation of `return_list` size, hnswlib sets another 
+                /// requirement that for each poping out node at current iteration, it can 
+                /// be the neighor of query-node IF AND ONLY IF its distance to all existing 
+                /// neighbors in `return_list` is further/larger than tis distance to 
+                /// query-node.
+                ///
+                /// In summary, the above rule tries to not let each node's neighbors be 
+                /// too close with each other which will demage the high-way privilege 
+                /// of HNSW graph structure.
+                /// 
+                /// The above idea can ref to:
+                ///     * https://mp.weixin.qq.com/s/ynXT945swVVJDFk8UJ-xIQ
+                ///     * https://blog.csdn.net/whenever5225/article/details/106863674 
+                ///
+                /// If not, we believe current popping-out-node is not "good" for HNSW graph 
+                /// to keep some high-ways, which means `good = false;`, and we will not 
+                /// let this node to be the neighbor of query-node.
                 for (std::pair<dist_t, tableint> second_pair : return_list) {
                     dist_t curdist =
                             fstdistfunc_(getDataByInternalId(second_pair.second),
@@ -971,6 +1023,18 @@ namespace hnswlib {
             return *((unsigned short int *)ptr);
         }
 
+        /**
+         * @brief
+         * Sets or resets the size of mem-buffer which saves each node's connection 
+         * info at certain layer/level of HNSW index. 
+         *
+         * @param ptr 
+         * A pointer points (the first bit/starting of) an c-style array which saves 
+         * one node's neighbors' internal-ids at certain layer of HNSW.
+         * @param size 
+         * The size/number of this node's neighbors after its connection info have 
+         * been updated or created(initialized).
+         */
         void setListCount(linklistsizeint * ptr, unsigned short int size) const {
             *((unsigned short int*)(ptr))=*((unsigned short int *)&size);
         }
@@ -981,15 +1045,23 @@ namespace hnswlib {
 
         /**
          * @brief
-         * Update already exist's internal id's corresponding vector data and linking info.
+         * This function has two responsibilities:
+         *     1. Based on new vector value on an existed node (which is, `internalId`-th node 
+         *        in HNWS index), update all nodes' graph/connection info which used to has 
+         *        target node(`internalId`-th node) as its friend-node/neighbor.
+         *        Since the vector of target-node has changed, so the connection/graph info 
+         *        of all nodes which have connection point to target-node needs to be updated.
+         *
+         *     2. Update already exist's internal id's corresponding vector data and linking info.
+         *        Its linking info will be updated with calling of `repairConnectionsForUpdate`.
          *
          * @param dataPoint Updating vector data.
          * @param internalId Target exists element's internal id.
-         * @param updateNeighborProbability TODO: 
+         * @param updateNeighborProbability TODO:  Figure it out.
          */
         void updatePoint(const void *dataPoint, tableint internalId, float updateNeighborProbability) {
             // update the feature vector associated with existing point with new vector
-            /// Tow steps:
+            /// Two steps:
             ///     1. Get the pointer points the first element of the target-updating vector, 
             ///        done by `getDataByInternalId(internalId)`.
             ///     2. Copy updating data pointed by `dataPoint` to corresponding bits range 
@@ -1009,175 +1081,217 @@ namespace hnswlib {
             /// update it links info in all layers it involves in. 
             int elemLevel = element_levels_[internalId];
             std::uniform_real_distribution<float> distribution(0.0, 1.0);
-            /// Iterating along each level/layer that current updating element involved in, 
-            /// and updating target element's graph connection info in that layer/level.
+            /// The following loop iterates along each level/layer that target updating element 
+            /// involves in, and, at that level/layer, updating the graph connection info of 
+            /// the node which will be affected by the updating of target element/node. 
+            /// 
+            /// These "affected" nodes at each composed by the nodes which has target updating 
+            /// node as their neighbor/friend-node at this layer/level. For each of these nodes, 
+            /// since one of its neighbors/friend-nodes' vector has been updated, so this node's 
+            /// graph/connection info at should also be updated.
             for (int layer = 0; layer <= elemLevel; layer++) {
-                /// Here are two data-structures used to dynamically and continuously mining 
-                /// `internalId`-th element's new top M nearest nodes, which are, friendly nodes.
+                /// Here are two data-structures used to help recalculation graph/connection 
+                /// info of arget-updating existed node's friend nodes, which connection info 
+                /// will be affected by the updating of target node's vector. P.S., the target 
+                /// updateing node refers to `internalId`-th element's of HNSW index.
                 ///
                 /// `sCand`: TODO: Make sure twice!
-                ///     This used to hold the candidates which have potential to be 
-                ///     `internalId`-th element's friend node (top M nearest nodes of it).
+                ///     This used to hold the candidates which have potential to be the new 
+                ///     neighbors of the elements which graph/connection info has been affected 
+                ///     by `internalId`-th node's vector updating.
                 ///
-                ///     NOTE: TODO: Make sure twice!
-                ///     `sCand` is dynamical updated during each iteration, some old & relatively 
-                ///     far-from `internalId`-th element nodes will be wiped out from `sCand` for 
-                ///     its replacment by recently-mined & relatively closer nodes. The size of 
-                ///     `sCand` must be equal or larger than M.
-                ///
-                ///     Some detail about friend-nodes' dynamically and continuously mining algo:
-                ///     The core idea is composed with several steps:
-                ///         1. Randomly choose an node in graph as entry-point.
-                ///         2. Insert as most as `sCand` size entry-point's top 
-                ///            closer-to-`internalId`-th-element node into `sCand` as first 
-                ///            generation of friend-node candidates.
-                ///         3. Paralleling getting each current candidated nodes' most 
-                ///            `internalId`-th-element-closing friend-nodes, choose `sCand`-size 
-                ///            most `internalId`-th-element-closing nodes from the union of 
-                ///            original candidates and new & just-choosed nodes as new candidates 
-                ///            in `sCand`, eliminate others out from `sCand`.
-                ///         4.  Continuously execute step 3 until `sCand` does not change any more. 
-                /// 
+                ///     NOTE: `sCand` has following components: 
+                ///     1. `internalId`-th node itself will also in `sCand`, since after its 
+                ///        vector has been updated, it also has probibality to be the neighbor 
+                ///        of nodes used to be its friend-nodes/neighbors.  
+                ///     2. Besides updated `internalId`-th node, `sCand` will also contain the 
+                ///        old/historical friend-nodes/neighbors of these updating-affected nodes.
+                ///     3. Since all these "updating affected nodes" are neighbors of same node (
+                ///        which is `internalId`-th node), so it's possible they are close to each 
+                ///        other, so for any one of them, any others could be this one's new 
+                ///        neighbor.
+                ///     
+                ///     Since these "updating-affected nodes" are neighbors/friend-nodes of 
+                ///     target-updating-node(`internalId`-th node), so we call them one-hop nodes (
+                ///     of target-updating-node), and the friend-nodes/neighbors of these 
+                ///     "one-hop nodes" called "two-hop nodes".
+                ///            
                 /// `sNeigh`: TODO: Make sure twice!
-                ///         `sNeigh` is used to check if `sCand` reachs stability/convergence, 
-                ///         which means `sCand` does not change any more.
-                ///         For each time before `sCand` doing the iteration, we will copy 
-                ///         `sCand` to `sNeigh`, and after `sCand` finished iteration, if `sCand` 
-                ///         is still same with `sNeigh`, then `sCand` reachs stability/convergence. 
-                ///      
+                ///     `sNeigh` saves "one-hop nodes" of target-updating node, which are old 
+                ///     friend-nodes/neighbors of it.
+                /// 
+                ///     Actually, `sNeigh` saves the nodes which may be affected by `internalId`-th 
+                ///     node's updating, and, these nodes are `internalId`-th node's neighbors. 
+                ///     The graph/connection info of the nodes in `sNeigh` needs update. 
                 std::unordered_set<tableint> sCand;
                 std::unordered_set<tableint> sNeigh;
-                /// Gets `internalId`-th element's `layer`-th level graph connection info, 
-                /// saving this element's friend-nodes internal-id into `listOneHop`. 
+                /// Gets `internalId`-th element's `layer`-th level graph connection info, which 
+                /// are its "one-hop-node"/friend-node/neighbors, saving there nodes internal-id 
+                /// into `listOneHop`. 
                 std::vector<tableint> listOneHop = getConnectionsWithLock(internalId, layer);
                 if (listOneHop.size() == 0)
                     continue;
 
-                /// In exists-element updating scenario, we use target updating element/node 
-                /// itself as algorithm entry-point, which is the first node inserted into 
-                /// candidate list `sCand`.
+                /// As mentioned above in annotation of `sCand`, the `internalId`-th node is 
+                /// one of the components of `sCand`. 
                 sCand.insert(internalId);
 
-                /// The following is the first time iteration/update for `sCand`. Which is just 
-                /// puts all friend-nodes of entry-point (which is `internalId` corresponding 
-                /// element itself) into candidates list `sCand` and convergence-adjuster `sNeigh`.
-                /// The above will be done by iterate along each entry-point's friend-nodes. 
+                /// The following loop filling the necessary components into `sCand` and `sNeigh`.
+                /// But this filling process is not strict, Refer to the "Random Behavior" in 
+                /// following annotation.
                 for (auto&& elOneHop : listOneHop) {
                     sCand.insert(elOneHop);
 
-                    /// TODO: Figure this out
+                    /// TODO: Think twice.
+                    /// Random Behavior 
+                    /// Q:
                     /// The following codes looks like involves randomness into candidates 
                     /// selection, but why this only works on `sNeigh` but not also on `sCand`?
+                    /// A:
+                    /// My guess is, by randomlly discard some potential nodes at this place, we 
+                    /// can let the graph keep/left some "high-way" by not let every updated 
+                    /// connection points to actual/most-possible nearest nodes. 
                     if (distribution(update_probability_generator_) > updateNeighborProbability)
                         continue;
 
                     sNeigh.insert(elOneHop);
 
-                    /// Get friend-nodes' internal-id list for current entry-point's friend-node.
-                    /// For friend-nodes of one node, we call 'one-hop', for friend-nodes of 
-                    /// frient-node of one node, we call 'two-hop'. 
+                    /// Gets "two-hop nodes" mentioned above by extracting the neighbors of 
+                    /// "one-hop nodes" (which are the neighbors of target-updating nodes, also 
+                    /// the nodes which connection/graph info directly affected by the updating 
+                    /// of target node), these "two-hop nodes" are the potential new neighbors 
+                    /// of these "one-hop nodes" which graph/connection info waiting update. 
                     std::vector<tableint> listTwoHop = getConnectionsWithLock(elOneHop, layer);
-                    /// The first time updating process of `sCand`, at this time, it's not 
-                    /// actually updating but appending more potential candidated into itself. 
-                    /// These new candidates are the friend-nodes of current candidate nodes, 
-                    /// which are, 'two-hop' nodes.
                     for (auto&& elTwoHop : listTwoHop) {
                         sCand.insert(elTwoHop);
                     }
                 }
 
-                /// Iteration along each current stage one-hop candidates.
+                /// Iteration along each current stage one-hop candidates. The target for each 
+                /// time iteration is, updating this target-updating-node's "one-hop-node"/
+                /// neighbor's graph/connection info at HNSW `layer`-th layer, since the 
+                /// graph/connection info of this "one-hop-node" of target-updating-node has been 
+                /// directly affected for target-node's vector updating, we should recalculate 
+                /// its connection info.
                 for (auto&& neigh : sNeigh) {
 //                    if (neigh == internalId)
 //                        continue;
                     
-                    /// Here we define an priority queue `candidates` to ranking the union of:
-                    ///     1. One-hop candidate friend-nodes.
-                    ///     2. Two-hop candidate friend-nodes, which are the friend-nodes of 
-                    ///        one-hop candidates.
+                    /// Here we initialize a new priority-queue `candidates` to ranking the nodes 
+                    /// in `sCand`, which are the potential new neighbors of each nodes which 
+                    /// connection info is affected be the updating of `internalId`-th element 
+                    /// in HNSW index, that is, each element `neigh` in `sNeigh`.
                     ///
-                    /// The ranking is according each candidats distance/similarity to 
-                    /// `internalId`-th element, higher similarity cnadidates has higher priority, 
-                    /// lower similarity nodes has lower similarity, and high priority to wipe 
-                    /// them out from candidate list. 
-                    /// 
-                    /// NOTE: TODO: Make sure twice!
-                    /// `sCand` is dynamical updated during each iteration, some old & relatively 
-                    /// far-from `internalId`-th element nodes will be wiped out from `sCand` for 
-                    /// its replacment by recently-mined & relatively closer nodes. The size of 
-                    /// `sCand` must be equal or larger than M.
+                    /// Note, the name 'candidate' may cause confusing, you need remenber that 
+                    /// here the 'candidates' means the candidates neighbors for `neigh`.
                     ///
-                    /// Some detail about friend-nodes' dynamically and continuously mining algo:
-                    /// The core idea is composed with several steps:
-                    ///     1. Randomly choose an node in graph as entry-point.
-                    ///     2. Insert as most as `sCand` size entry-point's top 
-                    ///        closer-to-`internalId`-th-element node into `sCand` as first 
-                    ///        generation of friend-node candidates.
-                    ///     3. Paralleling getting each current candidated nodes' most 
-                    ///        `internalId`-th-element-closing friend-nodes, choose `sCand`-size 
-                    ///        most `internalId`-th-element-closing nodes from the union of 
-                    ///        original candidates and new & just-choosed nodes as new candidates 
-                    ///        in `sCand`, eliminate others out from `sCand`.
-                    ///     4.  Continuously execute step 3 until `sCand` does not change any more. 
+                    /// Since we want update(find new) graph/connections info of `neigh`, so for 
+                    /// each element in `sNeigh` (which are old neighbors of `internalId`-th 
+                    /// element before its update), we rank all element in `sCand` according its 
+                    /// distance/similarity to `neigh`, higher similarity nodes has higher 
+                    /// priority, lower similarity nodes has lower similarity, and high priority 
+                    /// to wipe them out when considering if this is an neighbor of `neigh`.
+                    ///
+                    /// Note the priority-queue `candidates` has a size limit decided by following 
+                    /// `elementsToKeep`, so priority-queue is continuously/dymical updating by 
+                    /// continuously let `candidates` poping out the furtherest node from `neigh` 
+                    /// when an closer to `neigh` compare with it has been discovered.
                     std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidates;
                     /// The following two lines code is sort of getting an adjusted 
                     /// `ef_construction` value.
                     ///
                     /// In HNSW paper, ef_construction is the size of the prior-queue used to 
-                    /// dynamical/continuously mining target-nodes' top-M friend-nodes, the 
+                    /// dynamical/continuously mining target-nodes' top-M neighbors, the 
                     /// adjusted `ef_construction` will be saved in `elementsToKeep`.
                     size_t size = sCand.find(neigh) == sCand.end() ? sCand.size() : sCand.size() - 1; // sCand guaranteed to have size >= 1
                     size_t elementsToKeep = std::min(ef_construction_, size);
                     /// TODO: Make sure twice!
-                    /// What the following loop does is, Comparing one-hop candidates in `sNeigh` 
-                    /// with tow-hop candidates in `sCand`, and find each one-hop candidates
+                    /// As mentioned above, what following loop does is:
+                    ///     1. Note all `neigh` in `sNeigh` are also contained in `sCand`, the 
+                    ///        the reason is each element in `sNeigh` could also be petential 
+                    ///        neighbor of each other since all of them belongs to the neighbors 
+                    ///        of old target-updating-node, which means they are close to each 
+                    ///        other. 
+                    ///        With above background, we should avoid consider if `neigh` itself 
+                    ///        in `sCand` (certain `cand`) is nerghbor of itself.
+                    /// 
+                    ///     2. Calculation of the distance bewteen current `neigh` and all its 
+                    ///        potential neighbor `cand` in `sCand`, excludes the `cand` same 
+                    ///        with `neigh` itself.
+                    /// 
+                    ///     3. According to adjusted 'ef_construction' `elementsToKeep` to see if 
+                    ///        prior-queue `candidates` is saturated, here are several condition:
+                    ///        a. `candidates` not saturate:
+                    ///           Then any `cand` exclude `cand` same with `neigh` can be inserted 
+                    ///           into `candidates` with its distance/similarity to `neigh`.
+                    ///
+                    ///        b. `candidates` is saturated and current `cand`'s distance/similarity 
+                    ///           to `neigh` is closer/larger than the distance/similarity of the 
+                    ///           node in `candidates` which has furtherest distance or smallest 
+                    ///           similarity among all nodes in `candidates`:
+                    ///           Then pop that the node which has furtherest distance or smallest 
+                    ///           similarity among all nodes in `candidates` out from `candidates`, 
+                    ///           and `emplace` the `cand` into `candidates`.
+                    ///
+                    ///        c. Similar with condition b, but this time current `cand`'s 
+                    ///           distance/similarity does closer/higher than that value of any 
+                    ///           nodes in saturated `candidates`:
+                    ///           Do nothing about current `cand`, just passed it and go to next 
+                    ///           iteration. 
                     for (auto&& cand : sCand) {
                         if (cand == neigh)
                             continue;
 
-                        /// `fstdistfunc_` is a function used to calculate the distance/similarity 
-                        /// between two nodes, according to certain distance/similarity metric.
-                        ///
-                        /// TODO: BUG: 
-                        /// It seems, for each one-hop candidate node, we should see if each of 
-                        /// its friend-nodes (which are, two-hop candidates) should be put into 
-                        /// `candidates` according the distance/similarity between target-node 
-                        /// (`internalId`-th element) and each two-hop nodes.
-                        /// 
-                        /// In detail, if `candidates` is saturated (which means its size reachs 
-                        /// adjusted ef_construction value, `elementsToKeep`), then if a two-hop 
-                        /// candidate has relative higher similarity to target-node compare with 
-                        /// the element which is least similiar with target-node in `candidates`, 
-                        /// then this least-similiar-to-target-node will be wiped out from 
-                        /// `candidates` and replaced with current two-hop candidate node.
-                        ///
-                        /// BUT: 
-                        /// The potential bug is, for each two-hop node, hnswlib does not calculate 
-                        /// its distance/simlarity with target-node, but with its belonging one-hop
-                        /// node (two-hop nodes belonging one-hop node as friend-nodes).
                         dist_t distance = fstdistfunc_(getDataByInternalId(neigh), getDataByInternalId(cand), dist_func_param_);
-                        /// If   
                         if (candidates.size() < elementsToKeep) {
                             candidates.emplace(distance, cand);
                         } else {
-                            /// If this two-hop condidate node has higher similarity to 
                             if (distance < candidates.top().first) {
                                 candidates.pop();
                                 candidates.emplace(distance, cand);
                             }
                         }
                     }
+                    /// After above `for (auto&& cand : sCand) {...}` iteration, for each node 
+                    /// which graph/connections info has been affected by the updating of 
+                    /// `internalId`-th element, we got an prior-queue which saves most possible 
+                    /// candidate neighbors for it. The "most possible" means the candidate 
+                    /// neighbors in finally kept by `condidates` are the nodes which has top 
+                    /// `elementsToKeep` nearest distance or highest similarity among all 
+                    /// potential candidates among `sCand`.
 
-                    // Retrieve neighbours using heuristic and set connections.
+                    /// Retrive neighbours or `neigh` using heuristic and set connections. 
+                    /// And doing inplace-update for `candidates` to save the result of updated 
+                    /// neighbors of each `neigh`. 
+                    /// NOTE:
+                    /// Here the retriving rule is not just retriving the nearest/most-optimize 
+                    /// neighbors, but also considering about how to keep some high-way in graph.
                     getNeighborsByHeuristic2(candidates, layer == 0 ? maxM0_ : maxM_);
 
+                    /// The following code block's job is update HNSW graph structure at 
+                    /// `layer`-th level/layer for `neigh` using its new neighbors calculated 
+                    /// above, saving in `candidates`.
                     {
+                        /// The mutex instance `link_list_locks_[neigh]` is the mutex for
+                        /// `neigh`-th node(node which internal-id is `neigh`), so by only 
+                        /// lock `link_list_locks_[neigh]`, other thread can still writting 
+                        /// to other nodes' related info, this design can improbe concurrency 
+                        /// power of the lib.
                         std::unique_lock <std::mutex> lock(link_list_locks_[neigh]);
                         linklistsizeint *ll_cur;
                         ll_cur = get_linklist_at_level(neigh, layer);
                         size_t candSize = candidates.size();
+                        /// Resets the size of mem-buffer of `neigh`-th node at `layer`-th 
+                        /// layer/level according the number of its new calculated neighbors 
+                        /// saved in `candidates`.
                         setListCount(ll_cur, candSize);
+                        /// TODO: Figure out why let pointer `ll_cur` right move a byte?
                         tableint *data = (tableint *) (ll_cur + 1);
+                        /// Iteratively gets `neigh`-th node's new-calculated neighbor and 
+                        /// records their internal-id into `neigh`-th node's graph-info buffer 
+                        /// at `layer`-th layer of HNSW (which starting bit is pointed by `data`), 
+                        /// and pop out each of its neighbor from `candidates` and finally clean 
+                        /// `candidates` to empty when iteration have been finished. 
                         for (size_t idx = 0; idx < candSize; idx++) {
                             data[idx] = candidates.top().second;
                             candidates.pop();
@@ -1261,6 +1375,10 @@ namespace hnswlib {
          *     2. Extracts target connections info and put the result in an `std::vector`, 
          *        each element represents current element's friend-node's internal-id 
          *        at HNSW `level`-th layer graph.
+         *
+         * @return
+         * An `std::vector<tableint>` with each element is one of the neighbors of 
+         * `internalId`-th node of HNSW index at `level`-th layer. 
          */
         std::vector<tableint> getConnectionsWithLock(tableint internalId, int level) {
             std::unique_lock <std::mutex> lock(link_list_locks_[internalId]);
