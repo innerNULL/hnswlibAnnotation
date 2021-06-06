@@ -15,9 +15,16 @@ namespace hnswlib {
         VisitedList(int numelements1) {
             curV = -1;
             numelements = numelements1;
+            /// Allocate an mem-buffer with `numelements` `vl_type` bytes, each 
+            /// slot saves an visited/distant-calculated node's internal-id. 
             mass = new vl_type[numelements];
         }
-
+        
+        /**
+         * @brief
+         * The constructurn function combine with member function `reset` makes up
+         * an classical Two phase Construction in C++.
+         */
         void reset() {
             curV++;
             if (curV == 0) {

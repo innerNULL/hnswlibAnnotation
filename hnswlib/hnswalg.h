@@ -145,7 +145,8 @@ namespace hnswlib {
         double mult_, revSize_;
         int maxlevel_;
 
-
+        /// A instance which can allocate free `VisitedList` instance used to saving 
+        /// visited/distance-calculated nodes' internal-id. 
         VisitedListPool *visited_list_pool_;
         std::mutex cur_element_count_guard_;
         
@@ -236,16 +237,31 @@ namespace hnswlib {
         }
 
 
+        /**
+         * @brief
+         * Search neighbors of `data_point` based on `layer`-th layer of HNSW, with given 
+         *  `ep_id` as entry-point.
+         */
         std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>
         searchBaseLayer(tableint ep_id, const void *data_point, int layer) {
+            /// Gets an new-ninitalized data-structure `VisitedList` to save 
+            /// visited/distance-calculated nodes.
             VisitedList *vl = visited_list_pool_->getFreeVisitedList();
+            /// `vl->mass` or `visited_array` is the pointer points the mem-buffer 
+            /// which saving visited nodes' internal-ids.
             vl_type *visited_array = vl->mass;
+            /// `vl->curV` or `visited_array_tag` is the pointer points the number 
+            /// of nodes have been put into `vl`.
             vl_type visited_array_tag = vl->curV;
 
             std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
             std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidateSet;
 
             dist_t lowerBound;
+            /// There are two priority-queues above, `top_candidates` and `candidateSet`.
+            /// In following if-else block, 
+
+            /// if `ep_id` corresponding node is not deleted or logical-deleted.
             if (!isMarkedDeleted(ep_id)) {
                 dist_t dist = fstdistfunc_(data_point, getDataByInternalId(ep_id), dist_func_param_);
                 top_candidates.emplace(dist, ep_id);
@@ -253,8 +269,14 @@ namespace hnswlib {
                 candidateSet.emplace(-dist, ep_id);
             } else {
                 lowerBound = std::numeric_limits<dist_t>::max();
+                /// TODO: Firgure it out!
+                /// Let the deleted/logical-deleted entry-point's score in `candidateSet` 
+                /// be `-lowerBound` is maybe make it must be poped out from `candidateSet` 
+                /// in future?
+                /// But `lowerBound` is a `dist_t` instance without initialized well. 
                 candidateSet.emplace(-lowerBound, ep_id);
             }
+            /// Put entry-point into visited array c-style array `visited_array`.
             visited_array[ep_id] = visited_array_tag;
 
             while (!candidateSet.empty()) {
@@ -325,7 +347,9 @@ namespace hnswlib {
         std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>
         searchBaseLayerST(tableint ep_id, const void *data_point, size_t ef) const {
             VisitedList *vl = visited_list_pool_->getFreeVisitedList();
+            /// Gets mem-buffer saving visited/distant-calculated nodes' internal-id.
             vl_type *visited_array = vl->mass;
+            /// Gets current number of visited/distant-calculated nodes saved in `visited_array`.
             vl_type visited_array_tag = vl->curV;
 
             std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
@@ -1017,9 +1041,23 @@ namespace hnswlib {
         }
 
         /**
-         * @brief TODO: Figure it out.
+         * @brief
+         * Get the size (the number of elements) of an c-style array linked-list which 
+         * saving certain node's neighbors' internal-id at certain layer of HNSW index, 
+         * and (the starting byte of) this linked-list is pointed by `ptr`, which is 
+         * usually the result of calling `get_linklist_at_level`.
+         * 
+         * NOTE:
+         * The structure of the c-style array mem-buffer saving certain node's certain 
+         * layer neighbor/connection info is in following style, there are two components:
+         *     [neighbor_num, 1 byte][neighbors_internal_ids, `neighbor_num` bytes]
          */
         unsigned short int getListCount(linklistsizeint * ptr) const {
+            /// In c-style array mem-buffer saving certain node's graph/connection/neighbor 
+            /// info at certain layer of HNSW, the first byte saved how many neighbors this 
+            /// node has at target layer/level, which address is `ptr`, so following 
+            /// `*((unsigned short int *)ptr)` is an `unsigned short int` value represent 
+            /// the number of node's neighbors at this layer. 
             return *((unsigned short int *)ptr);
         }
 
@@ -1303,22 +1341,56 @@ namespace hnswlib {
             repairConnectionsForUpdate(dataPoint, entryPointCopy, internalId, elemLevel, maxLevelCopy);
         };
 
+        /**
+         * @brief
+         * This is the 
+         */
         void repairConnectionsForUpdate(const void *dataPoint, tableint entryPointInternalId, tableint dataPointInternalId, int dataPointLevel, int maxLevel) {
             tableint currObj = entryPointInternalId;
             if (dataPointLevel < maxLevel) {
                 dist_t curdist = fstdistfunc_(dataPoint, getDataByInternalId(currObj), dist_func_param_);
+                /// The following for loop is used to search a best entry-point for each 
+                /// layers' search.
+                /// The "best" means this entry-point tries best to be close to query-node.
+                /// 
+                /// The strategy is, using `entryPointInternalId` corresponding node as entry 
+                /// point for the highest layer query-node can touch, iterate from highest layer 
+                /// query-node can touch to lowest layer of HNSW, at each layer, it tries find 
+                /// the nearest node to the query-node and using that as the entry-point to next 
+                /// lower layer it will iterate on. 
                 for (int level = maxLevel; level > dataPointLevel; level--) {
                     bool changed = true;
                     while (changed) {
                         changed = false;
                         unsigned int *data;
                         std::unique_lock <std::mutex> lock(link_list_locks_[currObj]);
+                        /// `data` is the pointer points to the first byte of c-style array 
+                        /// mem-buffer saving the neighbor/connections info of `currObj`-th 
+                        /// node at `level`-th layer of HNSW. 
                         data = get_linklist_at_level(currObj,level);
+                        /// Number of neighors `currObj` has at `level`-th layer of HNSW.  
                         int size = getListCount(data);
+                        /// Ref to the NOTE in `getListCount`, first byte of mem-buffer pointed 
+                        /// by `data` is `size`(the number of neighbors), it saves neighbors' 
+                        /// internal-ids from second byte, the starting-byte of this range is 
+                        /// pointed by `datal`.
                         tableint *datal = (tableint *) (data + 1);
 #ifdef USE_SSE
                         _mm_prefetch(getDataByInternalId(*datal), _MM_HINT_T0);
 #endif
+                        /// Iterates along each neighbors of `currObj`, the target of iteration 
+                        /// is mining the nearest node to the `dataPoint` by walking along neighbors 
+                        /// of each current-best node (which is `currObj`) until can not find any
+                        /// nodes which has closer distance or higher similarity to `dataPoint` 
+                        /// compare with `currObj`, which is the best/nearest result among 
+                        /// historical iteration.
+                        ///
+                        /// For each time, if a new closer/higher-similarity nodes has been mined 
+                        /// out, we assign it to `currObj`, which will be as an new benchmark and 
+                        /// we will continuous mining by walk although its neighbors to see if 
+                        /// there any better result, it not, the loop will end, if getting an new 
+                        /// better result, that node will be an new `currObj` and the mining loop 
+                        /// continuously running.
                         for (int i = 0; i < size; i++) {
 #ifdef USE_SSE
                             _mm_prefetch(getDataByInternalId(*(datal + i + 1)), _MM_HINT_T0);
@@ -1328,16 +1400,31 @@ namespace hnswlib {
                             if (d < curdist) {
                                 curdist = d;
                                 currObj = cand;
+                                /// So here we now, the `changed` represents if the 
+                                /// closest/highest-similarity node has been changed after this 
+                                /// mining iteration. If not, the mining-loop will be ended.
                                 changed = true;
                             }
                         }
                     }
                 }
+                /// The closest-node mining alghrothm described above will be executed on several 
+                /// layers (maybe), from higher layer to lower layer, from second iterated layer, 
+                /// it will using the cloest-to-`dataPoint` node found be last layer as 
+                /// entry point, which is also `currObj`.
+                ///
+                /// So, after `for (int level = maxLevel; level > dataPointLevel; level--) {...}` 
+                /// loop, we get a node which has highest similarity or closest distance to 
+                /// `dataPoint` among all layers `dataPoint` can touch, based on current HNSW 
+                /// graph structure. 
             }
 
+            /// If this happend, there must be sth wrong even bug in index.
             if (dataPointLevel > maxLevel)
                 throw std::runtime_error("Level of item to be updated cannot be bigger than max level");
 
+            /// Again, iterates along the layers that `dataPoint` node can touch, from higher 
+            /// to lower layer, until reach first/bottom layer. 
             for (int level = dataPointLevel; level >= 0; level--) {
                 std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> topCandidates = searchBaseLayer(
                         currObj, dataPoint, level);
